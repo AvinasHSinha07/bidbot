@@ -36,12 +36,16 @@ async function checkAndFinalizeAuction(item) {
       const winner = await usersCollection().findOne({ userId: highestBid.userId });
       if (winner) {
         await bot.sendMessage(winner.userId, `Congratulations! You have won the auction for '${item.name}' with a bid of $${highestBid.amount}.`);
+      } else {
+        console.error(`Invalid winner or userId is empty for item '${item.name}'`);
       }
     }
 
     const creator = await usersCollection().findOne({ userId: item.creatorId });
     if (creator) {
       await bot.sendMessage(creator.userId, `The auction for '${item.name}' has ended. The winning bid is $${highestBid ? highestBid.amount : 0}.`);
+    } else {
+      console.error(`Invalid creator or userId is empty for item '${item.name}'`);
     }
 
     try {
@@ -83,17 +87,15 @@ bot.onText(/\/register/, async (msg) => {
   }
 });
 
-bot.onText(/\/createitem (\w+) (\d+) (\d+) (\d+) (low|high)/, async (msg, match) => {
+bot.onText(/\/createitem (\w+) (\d+) (\d+)/, async (msg, match) => {
   const chatId = msg.chat.id;
   const userId = msg.from.id;
   const itemName = match[1];
   const lowAmount = parseFloat(match[2]);
-  const highAmount = parseFloat(match[3]);
-  const auctionDurationMinutes = parseInt(match[4]);
-  const bidDirection = match[5]; 
+  const auctionDurationMinutes = parseInt(match[3]);
 
-  if (isNaN(lowAmount) || isNaN(highAmount) || isNaN(auctionDurationMinutes) || lowAmount <= 0 || highAmount <= 0 || lowAmount >= highAmount) {
-    return bot.sendMessage(chatId, 'Please enter valid low and high bid amounts and a valid auction duration in minutes. Low amount should be less than high amount.');
+  if (isNaN(lowAmount) || isNaN(auctionDurationMinutes) || lowAmount <= 0 || auctionDurationMinutes <= 0) {
+    return bot.sendMessage(chatId, 'Please enter valid bid amount and auction duration in minutes.');
   }
 
   const endTime = new Date(new Date().getTime() + auctionDurationMinutes * 60000);
@@ -104,40 +106,13 @@ bot.onText(/\/createitem (\w+) (\d+) (\d+) (\d+) (low|high)/, async (msg, match)
       return bot.sendMessage(chatId, 'You need to register first using /register command.');
     }
 
-    const item = { name: itemName, creatorId: userId, lowAmount, highAmount, endTime, highestBid: null, completed: false, bidDirection };
+    const item = { name: itemName, creatorId: userId, lowAmount, endTime, highestBid: null, completed: false };
     await itemsCollection().insertOne(item);
 
-    bot.sendMessage(chatId, `Item '${itemName}' has been created for bidding with bid range $${lowAmount} - $${highAmount} and bid direction: ${bidDirection}. Auction ends at ${endTime.toLocaleString()}.`);
+    bot.sendMessage(chatId, `Item '${itemName}' has been created for bidding with a minimum bid of $${lowAmount}. Auction ends at ${endTime.toLocaleString()}.`);
   } catch (err) {
     console.error("Error creating item:", err);
     bot.sendMessage(chatId, 'Failed to create item. Please try again later.');
-  }
-});
-
-bot.on('callback_query', async (callbackQuery) => {
-  const msg = callbackQuery.message;
-  const userId = callbackQuery.from.id;
-  const data = JSON.parse(callbackQuery.data);
-  
-  if (data.action === 'bid') {
-    const itemName = data.item;
-    const bidDirection = data.direction;
-
-    try {
-      const item = await itemsCollection().findOne({ name: itemName });
-      if (!item) {
-        return bot.sendMessage(msg.chat.id, `Item '${itemName}' does not exist.`);
-      }
-
-      if (item.bidDirection !== bidDirection) {
-        return bot.sendMessage(msg.chat.id, `This item only accepts bids towards ${item.bidDirection} amounts.`);
-      }
-
-      bot.sendMessage(msg.chat.id, `You can now bid on '${itemName}' with direction: ${bidDirection}.`);
-    } catch (err) {
-      console.error("Error handling bid direction:", err);
-      bot.sendMessage(msg.chat.id, 'Error handling bid direction. Please try again later.');
-    }
   }
 });
 
@@ -162,10 +137,8 @@ bot.onText(/\/bid (\w+) (\d+)/, async (msg, match) => {
       return bot.sendMessage(chatId, `The auction for '${itemName}' has already ended.`);
     }
 
-    if (item.bidDirection === 'low' && bidAmount >= item.highAmount) {
-      return bot.sendMessage(chatId, `This item accepts bids towards low amounts only. Your bid should be less than $${item.highAmount}.`);
-    } else if (item.bidDirection === 'high' && bidAmount <= item.lowAmount) {
-      return bot.sendMessage(chatId, `This item accepts bids towards high amounts only. Your bid should be more than $${item.lowAmount}.`);
+    if (bidAmount < item.lowAmount) {
+      return bot.sendMessage(chatId, `The bid amount must be at least $${item.lowAmount}.`);
     }
 
     const session = client.startSession();
@@ -225,7 +198,7 @@ bot.onText(/\/currentbid (\w+)/, async (msg, match) => {
     bot.sendMessage(chatId, 'Error fetching the current highest bid. Please try again later.');
   }
 });
-
+// List items command
 bot.onText(/\/items/, async (msg) => {
   const chatId = msg.chat.id;
 
@@ -237,7 +210,7 @@ bot.onText(/\/items/, async (msg) => {
 
     const itemList = items.map(item => {
       const highestBid = item.highestBid ? `$${item.highestBid.amount}` : 'No bids yet';
-      const timestamp = item.highestBid && item.highestBid.timestamp ? item.highestBid.timestamp.toLocaleString() : 'N/A';
+      const timestamp = item.highestBid && item.highestBid.timestamp ? item.highestBid.timestamp.toLocaleString() : 'N/A'; // Check for undefined
       return `${item.name} - Highest Bid: ${highestBid}, Bid Time: ${timestamp}`;
     }).join('\n');
     
@@ -248,6 +221,7 @@ bot.onText(/\/items/, async (msg) => {
   }
 });
 
+// List bidded items command
 bot.onText(/\/biddeditems/, async (msg) => {
   const chatId = msg.chat.id;
 
@@ -259,7 +233,7 @@ bot.onText(/\/biddeditems/, async (msg) => {
 
     const itemList = items.map(item => {
       const highestBid = item.highestBid ? `$${item.highestBid.amount}` : 'No bids yet';
-      const timestamp = item.highestBid && item.highestBid.timestamp ? item.highestBid.timestamp.toLocaleString() : 'N/A';
+      const timestamp = item.highestBid && item.highestBid.timestamp ? item.highestBid.timestamp.toLocaleString() : 'N/A'; // Check for undefined
       return `${item.name} - Highest Bid: ${highestBid}, Bid Time: ${timestamp}`;
     }).join('\n');
     
@@ -270,6 +244,7 @@ bot.onText(/\/biddeditems/, async (msg) => {
   }
 });
 
+// Help command
 bot.onText(/\/help/, (msg) => {
   const chatId = msg.chat.id;
   const helpMessage = `Commands:
@@ -287,19 +262,23 @@ app.get('/', (req, res) => {
   res.send('Bot is running');
 });
 
+// Start the Express server
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log(`Bot is running on port ${PORT}`);
 });
 
+// Error handling
 bot.on('polling_error', (err) => {
   console.error(err);
 });
 
+// Handle unhandled rejections
 process.on('unhandledRejection', (reason, p) => {
   console.error('Unhandled Rejection at:', p, 'reason:', reason);
 });
 
+// Handle uncaught exceptions
 process.on('uncaughtException', (err) => {
   console.error('Uncaught Exception:', err);
 });
