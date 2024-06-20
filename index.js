@@ -29,32 +29,24 @@ const bidsCollection = () => db.collection("bids");
 async function checkAndFinalizeAuction(item) {
   const now = new Date();
 
-  // Check if the auction has ended and is not yet completed
   if (item.endTime <= now && !item.completed) {
     const highestBid = item.highestBid;
 
-    // Notify the winner
     if (highestBid) {
       const winner = await usersCollection().findOne({ userId: highestBid.userId });
       if (winner) {
         await bot.sendMessage(winner.userId, `Congratulations! You have won the auction for '${item.name}' with a bid of $${highestBid.amount}.`);
-      } else {
-        console.error(`Invalid winner or userId is empty for item '${item.name}'`);
       }
     }
 
-    // Notify the creator
     const creator = await usersCollection().findOne({ userId: item.creatorId });
     if (creator) {
       await bot.sendMessage(creator.userId, `The auction for '${item.name}' has ended. The winning bid is $${highestBid ? highestBid.amount : 0}.`);
-    } else {
-      console.error(`Invalid creator or userId is empty for item '${item.name}'`);
     }
 
-    // Mark the item as completed in the database and delete it
     try {
       await itemsCollection().updateOne({ _id: item._id }, { $set: { completed: true } });
-      await itemsCollection().deleteOne({ _id: item._id }); // Remove the item from the database
+      await itemsCollection().deleteOne({ _id: item._id });
       console.log(`Item '${item.name}' has been deleted.`);
     } catch (err) {
       console.error(`Error marking item '${item.name}' as completed or deleting:`, err);
@@ -72,9 +64,8 @@ setInterval(async () => {
   } catch (err) {
     console.error('Error checking and finalizing auctions:', err);
   }
-}, 60000); // Check every minute
+}, 60000);
 
-// Register command
 bot.onText(/\/register/, async (msg) => {
   const chatId = msg.chat.id;
   const userId = msg.from.id;
@@ -92,7 +83,6 @@ bot.onText(/\/register/, async (msg) => {
   }
 });
 
-// Create item command with bid range and auction end time, and bid direction choice
 bot.onText(/\/createitem (\w+) (\d+) (\d+) (\d+) (low|high)/, async (msg, match) => {
   const chatId = msg.chat.id;
   const userId = msg.from.id;
@@ -151,7 +141,6 @@ bot.on('callback_query', async (callbackQuery) => {
   }
 });
 
-// Bid command with validation against bid range and chosen bid direction
 bot.onText(/\/bid (\w+) (\d+)/, async (msg, match) => {
   const chatId = msg.chat.id;
   const userId = msg.from.id;
@@ -173,14 +162,12 @@ bot.onText(/\/bid (\w+) (\d+)/, async (msg, match) => {
       return bot.sendMessage(chatId, `The auction for '${itemName}' has already ended.`);
     }
 
-    // Check bid direction and validate bid amount
     if (item.bidDirection === 'low' && bidAmount >= item.highAmount) {
       return bot.sendMessage(chatId, `This item accepts bids towards low amounts only. Your bid should be less than $${item.highAmount}.`);
     } else if (item.bidDirection === 'high' && bidAmount <= item.lowAmount) {
       return bot.sendMessage(chatId, `This item accepts bids towards high amounts only. Your bid should be more than $${item.lowAmount}.`);
     }
 
-    // Lock item for update
     const session = client.startSession();
     try {
       session.startTransaction();
@@ -196,7 +183,6 @@ bot.onText(/\/bid (\w+) (\d+)/, async (msg, match) => {
       await bidsCollection().insertOne(bid, { session });
       await itemsCollection().updateOne({ _id: itemWithLock._id }, { $set: { highestBid: bid } }, { session });
 
-      // Notify previous highest bidder
       if (itemWithLock.highestBid) {
         const previousBidder = await usersCollection().findOne({ userId: itemWithLock.highestBid.userId });
         if (previousBidder) {
@@ -219,7 +205,6 @@ bot.onText(/\/bid (\w+) (\d+)/, async (msg, match) => {
   }
 });
 
-// Current bid command
 bot.onText(/\/currentbid (\w+)/, async (msg, match) => {
   const chatId = msg.chat.id;
   const itemName = match[1];
@@ -241,7 +226,6 @@ bot.onText(/\/currentbid (\w+)/, async (msg, match) => {
   }
 });
 
-// List items command
 bot.onText(/\/items/, async (msg) => {
   const chatId = msg.chat.id;
 
@@ -253,7 +237,7 @@ bot.onText(/\/items/, async (msg) => {
 
     const itemList = items.map(item => {
       const highestBid = item.highestBid ? `$${item.highestBid.amount}` : 'No bids yet';
-      const timestamp = item.highestBid && item.highestBid.timestamp ? item.highestBid.timestamp.toLocaleString() : 'N/A'; // Check for undefined
+      const timestamp = item.highestBid && item.highestBid.timestamp ? item.highestBid.timestamp.toLocaleString() : 'N/A';
       return `${item.name} - Highest Bid: ${highestBid}, Bid Time: ${timestamp}`;
     }).join('\n');
     
@@ -264,7 +248,6 @@ bot.onText(/\/items/, async (msg) => {
   }
 });
 
-// List bidded items command
 bot.onText(/\/biddeditems/, async (msg) => {
   const chatId = msg.chat.id;
 
@@ -276,7 +259,7 @@ bot.onText(/\/biddeditems/, async (msg) => {
 
     const itemList = items.map(item => {
       const highestBid = item.highestBid ? `$${item.highestBid.amount}` : 'No bids yet';
-      const timestamp = item.highestBid && item.highestBid.timestamp ? item.highestBid.timestamp.toLocaleString() : 'N/A'; // Check for undefined
+      const timestamp = item.highestBid && item.highestBid.timestamp ? item.highestBid.timestamp.toLocaleString() : 'N/A';
       return `${item.name} - Highest Bid: ${highestBid}, Bid Time: ${timestamp}`;
     }).join('\n');
     
@@ -287,7 +270,6 @@ bot.onText(/\/biddeditems/, async (msg) => {
   }
 });
 
-// Help command
 bot.onText(/\/help/, (msg) => {
   const chatId = msg.chat.id;
   const helpMessage = `Commands:
@@ -305,23 +287,19 @@ app.get('/', (req, res) => {
   res.send('Bot is running');
 });
 
-// Start the Express server
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log(`Bot is running on port ${PORT}`);
 });
 
-// Error handling
 bot.on('polling_error', (err) => {
   console.error(err);
 });
 
-// Handle unhandled rejections
 process.on('unhandledRejection', (reason, p) => {
   console.error('Unhandled Rejection at:', p, 'reason:', reason);
 });
 
-// Handle uncaught exceptions
 process.on('uncaughtException', (err) => {
   console.error('Uncaught Exception:', err);
 });
