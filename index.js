@@ -100,7 +100,7 @@ bot.onText(/\/createitem (\w+) (\d+) (\d+) (\d+) (low|high)/, async (msg, match)
   const lowAmount = parseFloat(match[2]);
   const highAmount = parseFloat(match[3]);
   const auctionDurationMinutes = parseInt(match[4]);
-  const bidDirection = match[5]; // 'low' or 'high'
+  const bidDirection = match[5]; 
 
   if (isNaN(lowAmount) || isNaN(highAmount) || isNaN(auctionDurationMinutes) || lowAmount <= 0 || highAmount <= 0 || lowAmount >= highAmount) {
     return bot.sendMessage(chatId, 'Please enter valid low and high bid amounts and a valid auction duration in minutes. Low amount should be less than high amount.');
@@ -117,20 +117,37 @@ bot.onText(/\/createitem (\w+) (\d+) (\d+) (\d+) (low|high)/, async (msg, match)
     const item = { name: itemName, creatorId: userId, lowAmount, highAmount, endTime, highestBid: null, completed: false, bidDirection };
     await itemsCollection().insertOne(item);
 
-    // Create inline keyboard for bid direction choice
-    const keyboard = {
-      inline_keyboard: [
-        [
-          { text: 'Bid towards Low', callback_data: JSON.stringify({ action: 'bid', item: itemName, direction: 'low' }) },
-          { text: 'Bid towards High', callback_data: JSON.stringify({ action: 'bid', item: itemName, direction: 'high' }) }
-        ]
-      ]
-    };
-
-    bot.sendMessage(chatId, `Item '${itemName}' has been created for bidding with bid range $${lowAmount} - $${highAmount} and bid direction: ${bidDirection}. Auction ends at ${endTime.toLocaleString()}. Choose your bidding direction:`, { reply_markup: keyboard });
+    bot.sendMessage(chatId, `Item '${itemName}' has been created for bidding with bid range $${lowAmount} - $${highAmount} and bid direction: ${bidDirection}. Auction ends at ${endTime.toLocaleString()}.`);
   } catch (err) {
     console.error("Error creating item:", err);
     bot.sendMessage(chatId, 'Failed to create item. Please try again later.');
+  }
+});
+
+bot.on('callback_query', async (callbackQuery) => {
+  const msg = callbackQuery.message;
+  const userId = callbackQuery.from.id;
+  const data = JSON.parse(callbackQuery.data);
+  
+  if (data.action === 'bid') {
+    const itemName = data.item;
+    const bidDirection = data.direction;
+
+    try {
+      const item = await itemsCollection().findOne({ name: itemName });
+      if (!item) {
+        return bot.sendMessage(msg.chat.id, `Item '${itemName}' does not exist.`);
+      }
+
+      if (item.bidDirection !== bidDirection) {
+        return bot.sendMessage(msg.chat.id, `This item only accepts bids towards ${item.bidDirection} amounts.`);
+      }
+
+      bot.sendMessage(msg.chat.id, `You can now bid on '${itemName}' with direction: ${bidDirection}.`);
+    } catch (err) {
+      console.error("Error handling bid direction:", err);
+      bot.sendMessage(msg.chat.id, 'Error handling bid direction. Please try again later.');
+    }
   }
 });
 
