@@ -44,17 +44,11 @@ bot.onText(/\/register/, async (msg) => {
   }
 });
 
-// Create item command with bid range
-bot.onText(/\/createitem (\w+) (\d+) (\d+)/, async (msg, match) => {
+// Create item command
+bot.onText(/\/createitem (.+)/, async (msg, match) => {
   const chatId = msg.chat.id;
   const userId = msg.from.id;
   const itemName = match[1];
-  const lowAmount = parseFloat(match[2]);
-  const highAmount = parseFloat(match[3]);
-
-  if (isNaN(lowAmount) || isNaN(highAmount) || lowAmount <= 0 || highAmount <= 0 || lowAmount >= highAmount) {
-    return bot.sendMessage(chatId, 'Please enter valid low and high bid amounts. Low amount should be less than high amount.');
-  }
 
   try {
     const registeredUser = await usersCollection().findOne({ userId });
@@ -62,16 +56,16 @@ bot.onText(/\/createitem (\w+) (\d+) (\d+)/, async (msg, match) => {
       return bot.sendMessage(chatId, 'You need to register first using /register command.');
     }
 
-    const item = { name: itemName, creatorId: userId, lowAmount, highAmount, highestBid: null };
+    const item = { name: itemName, creatorId: userId, highestBid: null };
     await itemsCollection().insertOne(item);
-    bot.sendMessage(chatId, `Item '${itemName}' has been created for bidding with bid range $${lowAmount} - $${highAmount}.`);
+    bot.sendMessage(chatId, `Item '${itemName}' has been created for bidding.`);
   } catch (err) {
     console.error("Error creating item:", err);
     bot.sendMessage(chatId, 'Failed to create item. Please try again later.');
   }
 });
 
-// Bid command with validation against bid range and notification
+// Bid command
 bot.onText(/\/bid (\w+) (\d+)/, async (msg, match) => {
   const chatId = msg.chat.id;
   const userId = msg.from.id;
@@ -88,43 +82,14 @@ bot.onText(/\/bid (\w+) (\d+)/, async (msg, match) => {
       return bot.sendMessage(chatId, `Item '${itemName}' does not exist.`);
     }
 
-    if (bidAmount < item.lowAmount || bidAmount > item.highAmount) {
-      return bot.sendMessage(chatId, `Your bid must be within the range $${item.lowAmount} - $${item.highAmount}.`);
+    if (item.highestBid && bidAmount <= item.highestBid.amount) {
+      return bot.sendMessage(chatId, `Your bid must be higher than the current highest bid of $${item.highestBid.amount}.`);
     }
 
-    // Lock item for update
-    const session = client.startSession();
-    try {
-      session.startTransaction();
-
-      const itemWithLock = await itemsCollection().findOne({ _id: item._id }, { session });
-
-      if (itemWithLock.highestBid && bidAmount <= itemWithLock.highestBid.amount) {
-        await session.abortTransaction();
-        return bot.sendMessage(chatId, `Your bid must be higher than the current highest bid of $${itemWithLock.highestBid.amount}.`);
-      }
-
-      const bid = { itemId: itemWithLock._id, userId, amount: bidAmount, timestamp: new Date() };
-      await bidsCollection().insertOne(bid, { session });
-      await itemsCollection().updateOne({ _id: itemWithLock._id }, { $set: { highestBid: bid } }, { session });
-
-      // Notify previous highest bidder
-      if (itemWithLock.highestBid) {
-        const previousBidder = await usersCollection().findOne({ userId: itemWithLock.highestBid.userId });
-        if (previousBidder) {
-          bot.sendMessage(previousBidder.chatId, `You have been outbid on '${itemName}'. The new highest bid is $${bidAmount}.`);
-        }
-      }
-
-      await session.commitTransaction();
-      bot.sendMessage(chatId, `Your bid of $${bidAmount} on '${itemName}' has been placed.`);
-    } catch (err) {
-      await session.abortTransaction();
-      console.error("Error placing bid:", err);
-      bot.sendMessage(chatId, 'Error placing your bid. Please try again later.');
-    } finally {
-      session.endSession();
-    }
+    const bid = { itemId: item._id, userId, amount: bidAmount, timestamp: new Date() };
+    await bidsCollection().insertOne(bid);
+    await itemsCollection().updateOne({ _id: item._id }, { $set: { highestBid: bid } });
+    bot.sendMessage(chatId, `Your bid of $${bidAmount} on '${itemName}' has been placed.`);
   } catch (err) {
     console.error("Error placing bid:", err);
     bot.sendMessage(chatId, 'Error placing your bid. Please try again later.');
@@ -165,7 +130,7 @@ bot.onText(/\/items/, async (msg) => {
 
     const itemList = items.map(item => {
       const highestBid = item.highestBid ? `$${item.highestBid.amount}` : 'No bids yet';
-      return `${item.name} - Highest Bid: ${highestBid} (Bid range: $${item.lowAmount} - $${item.highAmount})`;
+      return `${item.name} - Highest Bid: ${highestBid}`;
     }).join('\n');
 
     bot.sendMessage(chatId, `Items available for bidding:\n${itemList}`);
@@ -180,12 +145,21 @@ bot.onText(/\/help/, (msg) => {
   const chatId = msg.chat.id;
   const helpMessage = `Commands:
   /register - Register to participate in bidding
-  /createitem <item_name> <low_amount> <high_amount> - Create a new item for bidding with a specified bid range
-  /bid <item_name> <amount> - Place a bid on an item within the specified bid range
+  /createitem <item_name> - Create a new item for bidding
+  /bid <item_name> <amount> - Place a bid on an item
   /currentbid <item_name> - View the current highest bid on an item
   /items - List all items available for bidding
   /help - Display this help message`;
   bot.sendMessage(chatId, helpMessage);
+});
+
+// HTTP endpoint to keep bot alive (required for platforms like Vercel)
+// Express endpoint to handle incoming updates from Telegram
+app.use(express.json());
+
+app.post(`/bot${token}`, (req, res) => {
+  bot.processUpdate(req.body);
+  res.sendStatus(200);
 });
 
 app.get('/', (req, res) => {
