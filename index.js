@@ -26,6 +26,54 @@ const usersCollection = () => db.collection("users");
 const itemsCollection = () => db.collection("items");
 const bidsCollection = () => db.collection("bids");
 
+async function checkAndFinalizeAuction(item) {
+  const now = new Date();
+
+  // Check if the auction has ended and is not yet completed
+  if (item.endTime <= now && !item.completed) {
+    const highestBid = item.highestBid;
+
+    // Notify the winner
+    if (highestBid) {
+      const winner = await usersCollection().findOne({ userId: highestBid.userId });
+      if (winner) {
+        await bot.sendMessage(winner.userId, `Congratulations! You have won the auction for '${item.name}' with a bid of $${highestBid.amount}.`);
+      } else {
+        console.error(`Invalid winner or userId is empty for item '${item.name}'`);
+      }
+    }
+
+    // Notify the creator
+    const creator = await usersCollection().findOne({ userId: item.creatorId });
+    if (creator) {
+      await bot.sendMessage(creator.userId, `The auction for '${item.name}' has ended. The winning bid is $${highestBid ? highestBid.amount : 0}.`);
+    } else {
+      console.error(`Invalid creator or userId is empty for item '${item.name}'`);
+    }
+
+    // Mark the item as completed in the database and delete it
+    try {
+      await itemsCollection().updateOne({ _id: item._id }, { $set: { completed: true } });
+      await itemsCollection().deleteOne({ _id: item._id }); // Remove the item from the database
+      console.log(`Item '${item.name}' has been deleted.`);
+    } catch (err) {
+      console.error(`Error marking item '${item.name}' as completed or deleting:`, err);
+    }
+  }
+}
+
+setInterval(async () => {
+  try {
+    const now = new Date();
+    const items = await itemsCollection().find({ endTime: { $lte: now }, completed: { $ne: true } }).toArray();
+    for (const item of items) {
+      await checkAndFinalizeAuction(item);
+    }
+  } catch (err) {
+    console.error('Error checking and finalizing auctions:', err);
+  }
+}, 60000); // Check every minute
+
 // Register command
 bot.onText(/\/register/, async (msg) => {
   const chatId = msg.chat.id;
@@ -44,11 +92,20 @@ bot.onText(/\/register/, async (msg) => {
   }
 });
 
-// Create item command
-bot.onText(/\/createitem (.+)/, async (msg, match) => {
+// Create item command with bid range and auction end time
+bot.onText(/\/createitem (\w+) (\d+) (\d+) (\d+)/, async (msg, match) => {
   const chatId = msg.chat.id;
   const userId = msg.from.id;
   const itemName = match[1];
+  const lowAmount = parseFloat(match[2]);
+  const highAmount = parseFloat(match[3]);
+  const auctionDurationMinutes = parseInt(match[4]);
+
+  if (isNaN(lowAmount) || isNaN(highAmount) || isNaN(auctionDurationMinutes) || lowAmount <= 0 || highAmount <= 0 || lowAmount >= highAmount) {
+    return bot.sendMessage(chatId, 'Please enter valid low and high bid amounts and a valid auction duration in minutes. Low amount should be less than high amount.');
+  }
+
+  const endTime = new Date(new Date().getTime() + auctionDurationMinutes * 60000);
 
   try {
     const registeredUser = await usersCollection().findOne({ userId });
@@ -56,16 +113,16 @@ bot.onText(/\/createitem (.+)/, async (msg, match) => {
       return bot.sendMessage(chatId, 'You need to register first using /register command.');
     }
 
-    const item = { name: itemName, creatorId: userId, highestBid: null };
+    const item = { name: itemName, creatorId: userId, lowAmount, highAmount, endTime, highestBid: null, completed: false };
     await itemsCollection().insertOne(item);
-    bot.sendMessage(chatId, `Item '${itemName}' has been created for bidding.`);
+    bot.sendMessage(chatId, `Item '${itemName}' has been created for bidding with bid range $${lowAmount} - $${highAmount}. Auction ends at ${endTime.toLocaleString()}.`);
   } catch (err) {
     console.error("Error creating item:", err);
     bot.sendMessage(chatId, 'Failed to create item. Please try again later.');
   }
 });
 
-// Bid command
+// Bid command with validation against bid range and notification
 bot.onText(/\/bid (\w+) (\d+)/, async (msg, match) => {
   const chatId = msg.chat.id;
   const userId = msg.from.id;
@@ -82,14 +139,27 @@ bot.onText(/\/bid (\w+) (\d+)/, async (msg, match) => {
       return bot.sendMessage(chatId, `Item '${itemName}' does not exist.`);
     }
 
-    if (item.highestBid && bidAmount <= item.highestBid.amount) {
-      return bot.sendMessage(chatId, `Your bid must be higher than the current highest bid of $${item.highestBid.amount}.`);
+    if (bidAmount < item.lowAmount || bidAmount > item.highAmount) {
+      return bot.sendMessage(chatId, `Your bid must be within the range $${item.lowAmount} - $${item.highAmount}.`);
     }
 
-    const bid = { itemId: item._id, userId, amount: bidAmount, timestamp: new Date() };
-    await bidsCollection().insertOne(bid);
-    await itemsCollection().updateOne({ _id: item._id }, { $set: { highestBid: bid } });
-    bot.sendMessage(chatId, `Your bid of $${bidAmount} on '${itemName}' has been placed.`);
+    const now = new Date();
+    if (item.endTime <= now) {
+      return bot.sendMessage(chatId, `The auction for '${itemName}' has already ended.`);
+    }
+
+    // Create inline keyboard with two buttons: Bid towards Low and Bid towards High
+    const keyboard = {
+      inline_keyboard: [
+        [
+          { text: 'Bid towards Low', callback_data: JSON.stringify({ action: 'bid', item: itemName, amount: bidAmount, direction: 'low' }) },
+          { text: 'Bid towards High', callback_data: JSON.stringify({ action: 'bid', item: itemName, amount: bidAmount, direction: 'high' }) }
+        ]
+      ]
+    };
+
+    // Send message with inline keyboard
+    bot.sendMessage(chatId, `Choose whether you want to bid towards low or high amounts for '${itemName}':`, { reply_markup: keyboard });
   } catch (err) {
     console.error("Error placing bid:", err);
     bot.sendMessage(chatId, 'Error placing your bid. Please try again later.');
@@ -130,13 +200,37 @@ bot.onText(/\/items/, async (msg) => {
 
     const itemList = items.map(item => {
       const highestBid = item.highestBid ? `$${item.highestBid.amount}` : 'No bids yet';
-      return `${item.name} - Highest Bid: ${highestBid}`;
+      const timestamp = item.highestBid && item.highestBid.timestamp ? item.highestBid.timestamp.toLocaleString() : 'N/A'; // Check for undefined
+      return `${item.name} - Highest Bid: ${highestBid}, Bid Time: ${timestamp}`;
     }).join('\n');
-
+    
     bot.sendMessage(chatId, `Items available for bidding:\n${itemList}`);
   } catch (err) {
     console.error("Error listing items:", err);
     bot.sendMessage(chatId, 'Error listing items. Please try again later.');
+  }
+});
+
+// Command to show bidded items
+bot.onText(/\/biddeditems/, async (msg) => {
+  const chatId = msg.chat.id;
+
+  try {
+    const items = await itemsCollection().find({ highestBid: { $exists: true } }).toArray();
+    if (items.length === 0) {
+      return bot.sendMessage(chatId, 'No items have been bidded on yet.');
+    }
+
+    const itemList = items.map(item => {
+      const highestBid = item.highestBid ? `$${item.highestBid.amount}` : 'No bids yet';
+      const timestamp = item.highestBid && item.highestBid.timestamp ? item.highestBid.timestamp.toLocaleString() : 'N/A'; // Check for undefined
+      return `${item.name} - Highest Bid: ${highestBid}, Bid Time: ${timestamp}`;
+    }).join('\n');
+    
+    bot.sendMessage(chatId, `Bidded items:\n${itemList}`);
+  } catch (err) {
+    console.error("Error listing bidded items:", err);
+    bot.sendMessage(chatId, 'Error listing bidded items. Please try again later.');
   }
 });
 
@@ -145,21 +239,13 @@ bot.onText(/\/help/, (msg) => {
   const chatId = msg.chat.id;
   const helpMessage = `Commands:
   /register - Register to participate in bidding
-  /createitem <item_name> - Create a new item for bidding
-  /bid <item_name> <amount> - Place a bid on an item
+  /createitem <item_name> <low_amount> <high_amount> <auction_duration_minutes> - Create a new item for bidding with a bid range and auction duration
+  /bid <item_name> <amount> - Place a bid on an item within the specified bid range
   /currentbid <item_name> - View the current highest bid on an item
   /items - List all items available for bidding
+  /biddeditems - List items that have received bids
   /help - Display this help message`;
   bot.sendMessage(chatId, helpMessage);
-});
-
-// HTTP endpoint to keep bot alive (required for platforms like Vercel)
-// Express endpoint to handle incoming updates from Telegram
-app.use(express.json());
-
-app.post(`/bot${token}`, (req, res) => {
-  bot.processUpdate(req.body);
-  res.sendStatus(200);
 });
 
 app.get('/', (req, res) => {
